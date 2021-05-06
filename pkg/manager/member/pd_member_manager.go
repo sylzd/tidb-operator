@@ -172,6 +172,7 @@ func (m *pdMemberManager) syncPDHeadlessServiceForTidbCluster(tc *v1alpha1.TidbC
 	return nil
 }
 
+// lzd: 完成 Service 的同步后，组件接入了集群的网络，可以在集群内访问和被访问。控制循环会进入 syncStatefulSetForTidbCluster，开始对 Statefulset 进行 Reconcile，首先是使用 syncTidbClusterStatus 对组件的 Status 信息进行同步，后续的扩缩容、Failover、升级等操作会依赖 Status 中的信息进行决策。
 func (m *pdMemberManager) syncPDStatefulSetForTidbCluster(tc *v1alpha1.TidbCluster) error {
 	ns := tc.GetNamespace()
 	tcName := tc.GetName()
@@ -184,19 +185,25 @@ func (m *pdMemberManager) syncPDStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 
 	oldPDSet := oldPDSetTmp.DeepCopy()
 
+	// lzd 1. 同步组件status：同步 Status 是 TiDB Operator 比较关键的操作，它需要同步 Kubernetes 各个组件的信息和 TiDB 的集群内部信息，例如在 Kubernetes 方面，在这一操作中会同步集群的副本数量，更新状态，镜像版本等信息，检查 Statefulset 是否处于更新状态。在 TiDB 集群信息方面，TiDB Operator 还需要将 TiDB 集群内部的信息从 PD 中同步下来。例如 PD 的成员信息，TiKV 的存储信息，TiDB 的成员信息等，TiDB 集群的健康检查的操作便是在更新 Status 这一操作内完成。
 	if err := m.syncTidbClusterStatus(tc, oldPDSet); err != nil {
 		klog.Errorf("failed to sync TidbCluster: [%s/%s]'s status, error: %v", ns, tcName, err)
 	}
 
+	// lzd 2. 检查TiDBCluster是否暂停同步：更新完状态后，会通过 tc.Spec.Paused 判断集群是否处于暂停同步状态，如果暂停同步，则会跳过下面更新 Statefulset 的操作。
 	if tc.Spec.Paused {
 		klog.V(4).Infof("tidb cluster %s/%s is paused, skip syncing for pd statefulset", tc.GetNamespace(), tc.GetName())
 		return nil
 	}
 
+	// lzd 3. 同步configmap：在同步完 Status 之后，syncConfigMap 函数会更新 ConfigMap，ConfigMap 一般包括了组件的配置文件和启动脚本。配置文件是通过 YAML 中 Spec 的 Config 项提取而来，目前支持 TOML 透传和 YAML 转换，并且推荐 TOML 格式。启动脚本则包含了获取组件所需的启动参数，然后用获取好的启动参数启动组件进程。在 TiDB Operator 中，当组件启动时需要向 TiDB Operator 获取启动参数时，TiDB Operator 侧的信息处理会放到 discovery 组件完成。如 PD 获取参数用于决定初始化还是加入某个节点，就会使用 wget 访问 discovery 拿到自己需要的参数。这种在启动脚本中获取参数的方法，避免了更新 Statefulset 过程中引起的非预期滚动更新，对线上业务造成影响。
 	cm, err := m.syncPDConfigMap(tc, oldPDSet)
 	if err != nil {
 		return err
 	}
+
+	// lzd 4. 根据 TidbCluster 配置生成新的 Statefulset，并且对新 Statefulset 进行滚动更新，扩缩容，Failover 相关逻辑的处理：
+	// lzd 4.1 getNewPDSetForTidbCluster 函数会得到一个新的 Statefulset 的模板，它包含了对刚才生成的 Service，ConfigMap 的引用，并且根据最新的 Status 和 Spec 生成其他项，例如 env，container，volume 等
 	newPDSet, err := getNewPDSetForTidbCluster(tc, cm)
 	if err != nil {
 		return err
@@ -213,6 +220,7 @@ func (m *pdMemberManager) syncPDStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 		return controller.RequeueErrorf("TidbCluster: [%s/%s], waiting for PD cluster running", ns, tcName)
 	}
 
+	// lzd 4.2 Upgrade 函数负责滚动更新相关操作，主要更新 Statefulset 中 UpgradeStrategy.Type 和 UpgradeStrategy.Partition，滚动更新是借助 Statefulset 的 RollingUpdate 策略实现的。组件 Reconcile 会设置 Statefulset 的升级策略为滚动更新，即组件 Statefulset 的 UpgradeStrategy.Type 设置为 RollingUpdate 。在 Kubernetes 的 Statefulset 使用中，可以通过配置 UpgradeStrategy.Partition 控制滚动更新的进度，即 Statefulset 只会更新序号大于或等于 partition 的值，并且未被更新的 Pod。通过这一机制就可以实现每个 Pod 在正常对外服务后才继续滚动更新。在非升级状态或者升级的启动阶段，组件的 Reconcile 会将 Statefulset 的 UpgradeStrategy.Partition 设置为 Statefulset 中最大的 Pod 序号，防止有 Pod 更新。在开始更新后，当一个 Pod 更新，并且重启后对外提供服务，例如 TiKV 的 Store 状态变为 Up，TiDB 的 Member 状态为 healthy，满足这样的条件的 Pod 才被视为升级成功，然后调小 Partition 的值进行下一 Pod 的更新
 	// Force update takes precedence over scaling because force upgrade won't take effect when cluster gets stuck at scaling
 	if !tc.Status.PD.Synced && NeedForceUpgrade(tc.Annotations) {
 		tc.Status.PD.Phase = v1alpha1.UpgradePhase
@@ -221,6 +229,7 @@ func (m *pdMemberManager) syncPDStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 		return controller.RequeueErrorf("tidbcluster: [%s/%s]'s pd needs force upgrade, %v", ns, tcName, errSTS)
 	}
 
+	// lzd 4.3 m.scaler.Scale 函数负责扩缩容相关操作，主要是更新 Statefulset 中组件的 Replicas。Scale 遵循逐个扩缩容的原则，每次扩缩容的跨度为 1。Scale 函数会将 TiDBCluster 中指定的组件 Replicas 数，如 tc.Spec.PD.Replicas，与现有比较，先判断是扩容需求还是缩容需求，然后完成一个步长的扩缩容的操作，再进入下一次组件 Reconcile，通过多次 Reconcile 完成所有的扩缩容需求。在扩缩容的过程中，会涉及到 PD 转移 Leader，TiKV 删除 Store 等使用 PD API 的操作，组件 Reconcile 过程中会使用 PD API 完成上述操作，并且判断操作是否成功，再逐步进行下一次扩缩容。
 	// Scaling takes precedence over upgrading because:
 	// - if a pd fails in the upgrading, users may want to delete it or add
 	//   new replicas
@@ -230,6 +239,7 @@ func (m *pdMemberManager) syncPDStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 		return err
 	}
 
+	// lzd 4.4 m.failover.Failover 函数负责容灾相关的操作，包括发现和记录灾难状态，恢复灾难状态等，在部署 TiDB Operator 时配置打开 AutoFailover 后，当发现有 Failure 的组件时记录相关信息到 FailureStores 或者 FailureMembers 这样的状态存储的键值，并启动一个新的组件 Pod 用于承担这个 Pod 的工作负载。当原 Pod 恢复工作后，通过修改 Statefulset 的 Replicas 数量，将用于容灾时分担工作负载的 Pod 进行缩容操作。但是在 TiKV/TiFlash 的容灾逻辑中，自动缩容容灾过程中的 Pod 不是默认操作，需要设置 spec.tikv.recoverFailover: true 才会对新启动的 Pod 缩容
 	if m.deps.CLIConfig.AutoFailover {
 		if m.shouldRecover(tc) {
 			m.failover.Recover(tc)
@@ -246,7 +256,10 @@ func (m *pdMemberManager) syncPDStatefulSetForTidbCluster(tc *v1alpha1.TidbClust
 		}
 	}
 
+	// lzd 5. 创建或者更新 Statefulset：在同步 Statefulset 的最后阶段，已经完成了新 Statefulset 的生成，这时候会进入 UpdateStatefulSet 函数，这一函数中主要比对新的 Statefulset 和现有 StatefulSet 差异，如果不一致，则进行 Statefulset 的实际更新。另外，这一函数还需要检查是否有没有被管理的 Statefulset，这部分主要是旧版本使用 Helm Chart 部署的 TiDB，需要将这些 Statefulset 纳入 TiDB Operator 的管理，给他们添加依赖标记。
 	return UpdateStatefulSet(m.deps.StatefulSetControl, tc, newPDSet, oldPDSet)
+
+	// lzd 6. 完成上述操作后，TiDBCluster CR 的 Status 更新到最新，相关 Service，ConfigMap 被创建，生成了新的 Statefulset，并且满足了滚动更新，扩缩容，Failover 的工作。组件的 Reconcile 周而复始，监控着组件的生命周期状态，响应生命周期状态改变和用户输入改变，使得集群在符合预期的状态下正常运行。
 }
 
 // shouldRecover checks whether we should perform recovery operation.

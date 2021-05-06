@@ -70,6 +70,7 @@ func NewController(deps *controller.Dependencies) *Controller {
 		),
 	}
 
+	// lzd: 在 Controller 的初始化函数过程中，会初始化一系列 Informer，这些 Informer 主要用来和 kube-apiserver 交互获取 CRD 和相关资源的变更。以 TiDBCluster 为例，在初始化函数 NewController 中，会初始化 Informer 对象
 	tidbClusterInformer := deps.InformerFactory.Pingcap().V1alpha1().TidbClusters()
 	statefulsetInformer := deps.KubeInformerFactory.Apps().V1().StatefulSets()
 	tidbClusterInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -90,6 +91,7 @@ func NewController(deps *controller.Dependencies) *Controller {
 	return c
 }
 
+// lzd: 以 TiDBCluster Controller 为例，Run 函数会启动 worker 处理工作队列
 // Run runs the tidbcluster controller.
 func (c *Controller) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
@@ -105,6 +107,7 @@ func (c *Controller) Run(workers int, stopCh <-chan struct{}) {
 	<-stopCh
 }
 
+// lzd: Worker 会调用 processNextWorkItem 函数，弹出队列的元素，然后调用 sync 函数进行同步
 // worker runs a worker goroutine that invokes processNextWorkItem until the the controller's queue is closed
 func (c *Controller) worker() {
 	for c.processNextWorkItem() {
@@ -132,6 +135,7 @@ func (c *Controller) processNextWorkItem() bool {
 	return true
 }
 
+// lzd: Sync 函数会根据 Key 获取对应的 CR 对象，例如这里的 TiDBCluster 对象，然后对这个 TiDBCluster 对象进行同步
 // sync syncs the given tidbcluster.
 func (c *Controller) sync(key string) error {
 	startTime := time.Now()
@@ -154,6 +158,8 @@ func (c *Controller) sync(key string) error {
 
 	return c.syncTidbCluster(tc.DeepCopy())
 }
+
+// lzd: syncTidbCluster 函数调用 updateTidbCluster 函数，进而调用一系列组件的 Sync 函数实现 TiDB 集群管理的相关工作
 
 func (c *Controller) syncTidbCluster(tc *v1alpha1.TidbCluster) error {
 	return c.control.UpdateTidbCluster(tc)

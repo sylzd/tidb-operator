@@ -192,6 +192,7 @@ func (c *defaultTidbClusterControl) updateTidbCluster(tc *v1alpha1.TidbCluster) 
 	//   - upgrade the pd cluster
 	//   - scale out/in the pd cluster
 	//   - failover the pd cluster
+	//lzd:  pkg/controller/tidbcluster/tidb_cluster_control.go 的 updateTidbCluster 函数实现中，我们可以看到各个组件的 Sync 函数在这里调用，在相关调用代码注释里描述着每个 Sync 函数执行的生命周期操作事件，可以帮助理解每个组件的 Reconcile 需要完成哪些工作，例如 PD 组件:
 	if err := c.pdMemberManager.Sync(tc); err != nil {
 		return err
 	}

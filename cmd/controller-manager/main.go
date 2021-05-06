@@ -145,7 +145,7 @@ func main() {
 			Start(stopCh <-chan struct{})
 			WaitForCacheSync(stopCh <-chan struct{}) map[reflect.Type]bool
 		}
-
+		// lzd: TiDB Operator 使用 tidb-controller-manager 管理各个 CRD 的 Controller。从 cmd/controller-manager/main.go 开始，tidb-controller-manager 首先加载了 kubeconfig，用于连接 kube-apiserver，然后使用一系列 NewController 函数，加载了各个 Controller 的初始化函数。
 		// Initialize all controllers
 		controllers := []Controller{
 			tidbcluster.NewController(deps),
@@ -163,6 +163,8 @@ func main() {
 			controllers = append(controllers, autoscaler.NewController(deps))
 		}
 
+		// lzd: Informer 中添加了处理添加，更新，删除事件的 EventHandler，把监听到的事件涉及到的 CR 的 Key 加入队列。
+		// 初始化完成后启动 InformerFactory 并等待 cache 同步完成。
 		// Start informer factories after all controllers are initialized.
 		informerFactories := []InformerFactory{
 			deps.InformerFactory,
@@ -179,6 +181,7 @@ func main() {
 		}
 		klog.Info("cache of informer factories sync successfully")
 
+		// lzd: 随后 tidb-controller-manager 会调用各个 Controller 的 Run 函数，开始循环执行 Controller 的内部逻辑。
 		// Start syncLoop for all controllers
 		for _, controller := range controllers {
 			c := controller

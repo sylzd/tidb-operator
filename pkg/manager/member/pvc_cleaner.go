@@ -66,6 +66,21 @@ func (c *realPVCCleaner) Clean(meta metav1.Object) (map[string]string, error) {
 	return c.reclaimPV(meta)
 }
 
+// lzd 除了 TiDB 主要组件的视角之外，还有一些运维操作被编排到了下面的函数实现中，他们分别负责了以下工作：
+//
+//Discovery，用于 PD 启动参数的配置和 TiDB Dashboard Proxy，Discovery 的存在，可以提供一些动态信息供组件索取，避免了修改 ConfigMap 导致 Pod 滚动更新。
+//
+//Reclaim Policy Manager，用于同步 tc.Spec.PVReclaimPolicy 的配置，默认配置下会将PV 的 Reclaim Policy 设置为 Retain，降低数据丢失的风险。
+//
+//Orphan Pod Cleaner，用于在 PVC 创建失败的时候清除 Pod，让 Statefulset Controller 重试 Pod 和对应 PVC 的创建。
+//
+//PVC Cleaner 用于 PVC 相关资源清理，清理被标记可以删除的 PVC。
+//
+//PVC Resizer 用于 PVC 的扩容，在云上使用时可以通过修改 TidbCluster 中的 Storage 相关配置修改 PVC 的大小。
+//
+//Meta Manager 用于同步 StoreIDLabel，MemberIDLabel，NamespaceLabel 等信息到 Pod，PVC，PV 的 label 上。
+//
+//TiDBCluster Status Manager 用于同步 TidbMonitor 和 TiDB Dashboard 相关信息。
 // reclaimPV reclaims PV used by tidb cluster if necessary.
 func (c *realPVCCleaner) reclaimPV(meta metav1.Object) (map[string]string, error) {
 	var clusterType string
